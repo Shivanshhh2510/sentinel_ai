@@ -1,26 +1,80 @@
 import pandas as pd
 import os
+import redis
 
 from app.automl.automl_engine import run_automl
 from app.ai.llm_engine import generate_explanation
 from app.llm.gemini_sql import sanitize_columns
 from app.profiling.data_profiler import profile_data
-from app.vector.endee_store import build_endee_store
+from app.vector.vector_factory import get_vector_store
 
 
 # ==================================
-# GLOBAL DATA STORAGE
+# REDIS CONNECTION
+# ==================================
+
+redis_client = redis.Redis(host="localhost", port=6379, db=0)
+
+
+# ==================================
+# GLOBAL DATA STORAGE (fallback only)
 # ==================================
 
 CURRENT_DF_RAW = None
 CURRENT_DF_ENCODED = None
 
 
+# ==================================
+# SET CURRENT DATAFRAME (NEW)
+# ==================================
+
+def set_current_df(df: pd.DataFrame):
+    """
+    Allows external services (dataset_query_service, chat_engine)
+    to update the active dataset in memory.
+    """
+    global CURRENT_DF_RAW
+    CURRENT_DF_RAW = df
+
+
 def get_current_df():
     """
     Used by analytics engine.
-    Must return RAW dataframe.
+    Loads dataset using Redis stored file path.
     """
+
+    global CURRENT_DF_RAW
+
+    file_path = redis_client.get("current_dataset_path")
+
+    if file_path:
+
+        try:
+
+            file_path = file_path.decode()
+
+            ext = os.path.splitext(file_path)[1].lower()
+
+            if ext == ".csv":
+
+                try:
+                    df = pd.read_csv(file_path, encoding="utf-8")
+                except UnicodeDecodeError:
+                    df = pd.read_csv(file_path, encoding="latin1")
+
+            elif ext in [".xlsx", ".xls"]:
+
+                df = pd.read_excel(file_path)
+
+            else:
+                return CURRENT_DF_RAW
+
+            CURRENT_DF_RAW = df
+            return df
+
+        except Exception:
+            return CURRENT_DF_RAW
+
     return CURRENT_DF_RAW
 
 
@@ -42,6 +96,7 @@ def detect_target_column(df):
 
     # Prefer categorical classification targets
     for col in categorical_cols:
+
         classes = df[col].nunique()
 
         if 2 <= classes <= 20:
@@ -120,6 +175,15 @@ def load_csv(file_path: str):
     CURRENT_DF_RAW = df.copy()
 
     # --------------------------------
+    # SAVE DATASET PATH IN REDIS
+    # --------------------------------
+
+    try:
+        redis_client.set("current_dataset_path", file_path)
+    except Exception as e:
+        print("Redis dataset path store failed:", e)
+
+    # --------------------------------
     # DATASET PROFILING
     # --------------------------------
 
@@ -140,7 +204,7 @@ def load_csv(file_path: str):
     CURRENT_DF_ENCODED = df_encoded
 
     # ==================================
-    # BUILD ENDEE STORE (RAG)
+    # BUILD VECTOR STORE (Qdrant)
     # ==================================
 
     try:
@@ -148,18 +212,21 @@ def load_csv(file_path: str):
         documents = []
 
         for _, row in df.iterrows():
+
             text_parts = []
 
             for col, val in row.items():
+
                 if pd.notna(val):
                     text_parts.append(f"{col}: {val}")
 
             documents.append(" | ".join(text_parts))
 
-        build_endee_store(documents)
+        vector_store = get_vector_store()
+        vector_store.upsert(documents)
 
     except Exception as e:
-        print("Endee store build failed:", e)
+        print("Vector store build failed:", e)
 
     # --------------------------------
     # RUN AUTOML
@@ -214,9 +281,9 @@ def load_csv(file_path: str):
     }
 
     top_features = sorted(
-    feature_importance,
-    key=feature_importance.get,
-    reverse=True
+        feature_importance,
+        key=feature_importance.get,
+        reverse=True
     )[:5]
 
     # --------------------------------

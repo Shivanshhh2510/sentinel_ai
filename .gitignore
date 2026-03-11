@@ -1,11 +1,27 @@
-venv/
+# Python
 __pycache__/
 *.pyc
-*.pkl
-*.joblib
-*.h5
-*.db
-*.sqlite3
-.env
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env/
+
+# OS files
 .DS_Store
-storage/*.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Streamlit cache
+.streamlit/
+
+# Python build
+build/
+dist/

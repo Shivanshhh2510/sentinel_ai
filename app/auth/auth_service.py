@@ -1,7 +1,8 @@
 import bcrypt
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 
-from app.db.database import get_db_connection
+from app.models.user import User
 from app.auth.jwt_handler import create_access_token
 
 
@@ -9,27 +10,25 @@ from app.auth.jwt_handler import create_access_token
 # REGISTER
 # ------------------------
 
-def register_user(payload: dict):
+def register_user(payload: dict, db: Session):
     email = payload["email"]
     password = payload["password"]
 
-    conn = get_db_connection()
-    c = conn.cursor()
+    existing_user = db.query(User).filter(User.email == email).first()
 
-    c.execute("SELECT id FROM users WHERE email=?", (email,))
-    if c.fetchone():
-        conn.close()
+    if existing_user:
         raise HTTPException(status_code=400, detail="User already exists")
 
-    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-    c.execute(
-        "INSERT INTO users (email, password) VALUES (?,?)",
-        (email, hashed)
+    new_user = User(
+        email=email,
+        password=hashed_password
     )
 
-    conn.commit()
-    conn.close()
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
 
     return {"message": "User registered successfully"}
 
@@ -38,29 +37,21 @@ def register_user(payload: dict):
 # LOGIN
 # ------------------------
 
-def login_user(payload: dict):
+def login_user(payload: dict, db: Session):
     email = payload["email"]
     password = payload["password"]
 
-    conn = get_db_connection()
-    c = conn.cursor()
-
-    c.execute("SELECT id, password FROM users WHERE email=?", (email,))
-    user = c.fetchone()
-    conn.close()
+    user = db.query(User).filter(User.email == email).first()
 
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    user_id = user["id"]
-    hashed_password = user["password"]
-
-    if not bcrypt.checkpw(password.encode(), hashed_password.encode()):
+    if not bcrypt.checkpw(password.encode(), user.password.encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_access_token({
-        "user_id": user_id,
-        "email": email
+        "user_id": user.id,
+        "email": user.email
     })
 
     return {

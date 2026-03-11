@@ -1,24 +1,4 @@
-import os
-from google import genai
-
-
-# ==========================================
-# GEMINI CLIENT INITIALIZATION
-# ==========================================
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-client = None
-
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        print("[OK] Gemini client initialized")
-    except Exception:
-        client = None
-        print("[WARN] Gemini initialization failed — fallback mode")
-else:
-    print("[WARN] GEMINI_API_KEY not found — running in fallback mode")
+from app.llm.llm_factory import get_llm
 
 
 # ==========================================
@@ -26,9 +6,6 @@ else:
 # ==========================================
 
 def fallback_explanation(prediction, confidence, top_features):
-    """
-    Rule-based ML explanation (always works even if Gemini fails)
-    """
 
     feature_text = ", ".join(top_features) if top_features else "multiple dataset features"
 
@@ -44,79 +21,71 @@ def fallback_explanation(prediction, confidence, top_features):
 # ==========================================
 
 def fallback_rag_response(prompt: str):
-    """
-    Fallback if Gemini fails for RAG queries.
-    """
 
     return (
-        "Based on the retrieved dataset context, the answer can be derived "
-        "from the information shown above. However, AI reasoning service "
-        "is currently unavailable."
+        "AI reasoning service is currently unavailable. "
+        "Insights can still be derived from charts and dataset analysis."
     )
 
 
 # ==========================================
-# ML MODEL EXPLANATION (AutoML pipeline)
+# ML MODEL EXPLANATION
 # ==========================================
 
 def generate_explanation(prediction, confidence, top_features):
-    """
-    Generates explanation for ML predictions.
-    Uses Gemini if available, otherwise fallback.
-    """
 
     prompt = f"""
-You are an AI assistant explaining a machine learning prediction.
+You are generating a concise model performance summary for a business intelligence dashboard.
 
-Prediction: {prediction}
-Confidence: {confidence}
-Top Influencing Factors: {top_features}
+Model Status: {prediction}
+Confidence Score: {confidence}
+Top Features: {top_features}
 
-Explain in simple, business-friendly language why this prediction happened.
-Keep it short, clear, and actionable.
+Write a short, structured summary with the following sections:
+
+MODEL SIGNAL:
+- Interpret the confidence level in practical terms (1–2 sentences).
+
+DRIVERS:
+- Briefly explain why the top features matter (bullet-style, short).
+
+IMPLICATION:
+- State what this means for business monitoring or decision support (1–2 sentences).
+
+RECOMMENDED NEXT STEP:
+- One clear, practical improvement action.
+
+Constraints:
+- No greetings.
+- No email tone.
+- No storytelling.
+- No placeholders like [Executive].
+- No unnecessary explanations.
+- Keep it under 180 words.
+- Professional, neutral, dashboard-ready tone.
 """
 
-    if client:
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt
-            )
+    llm = get_llm()
 
-            if response and hasattr(response, "text") and response.text:
-                return response.text.strip()
+    response = llm.generate(prompt)
 
-        except Exception:
-            pass
+    if not response or "unavailable" in response.lower():
+        return fallback_explanation(prediction, confidence, top_features)
 
-    return fallback_explanation(prediction, confidence, top_features)
+    return response
 
 
 # ==========================================
-# GENERIC LLM RESPONSE (Used by RAG engine)
+# GENERIC LLM RESPONSE (RAG Engine)
 # ==========================================
 
 def generate_llm_response(prompt: str):
 
-    if client:
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt
-            )
+    llm = get_llm()
 
-            # DEBUG PRINT
-            print("[Gemini answer]:", response)
+    response = llm.generate(prompt)
 
-            # Method 1 (most common)
-            if hasattr(response, "text") and response.text:
-                return response.text.strip()
+    if not response or "unavailable" in response.lower():
+        return fallback_rag_response(prompt)
 
-            # Method 2 (fallback parsing)
-            if hasattr(response, "candidates"):
-                return response.candidates[0].content.parts[0].text.strip()
-
-        except Exception as e:
-            print("[Gemini ERROR]:", str(e))
-
-    return fallback_rag_response(prompt)
+    return response

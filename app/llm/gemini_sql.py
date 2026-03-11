@@ -1,37 +1,8 @@
-import os
 import re
 import pandas as pd
 import pandasql
 
-# New Gemini SDK
-from google import genai
-
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-MODEL_NAME = "gemini-2.0-flash"
-
-
-# ============================================================
-# INIT GEMINI CLIENT (OPTIONAL)
-# ============================================================
-
-client = None
-
-if GEMINI_KEY:
-    try:
-        client = genai.Client(
-            api_key=GEMINI_KEY,
-            http_options={"api_version": "v1beta"}
-        )
-        print("[OK] Gemini client initialized")
-    except Exception as e:
-        print("[WARN] Gemini init failed:", e)
-else:
-    print("[WARN] GEMINI_API_KEY not found")
+from app.llm.llm_factory import get_llm
 
 
 # ============================================================
@@ -61,49 +32,42 @@ def clean_sql(text: str) -> str:
 
 
 # ============================================================
-# RULE BASED SQL (ALWAYS WORKS)
+# RULE BASED SQL (SAFE FALLBACK)
 # ============================================================
 
 def generate_sql_rule_based(question: str, columns: list[str]) -> str:
 
     q = question.lower()
 
-    # COUNT
     if "count" in q or "how many" in q:
         return "SELECT COUNT(*) AS count FROM data"
 
-    # AVG
     if "average" in q or "avg" in q:
         col = columns[0]
         return f"SELECT AVG({col}) AS average FROM data"
 
-    # SUM
     if "sum" in q or "total" in q:
         col = columns[0]
         return f"SELECT SUM({col}) AS total FROM data"
 
-    # MAX
     if "max" in q or "highest" in q:
         col = columns[0]
         return f"SELECT MAX({col}) AS max FROM data"
 
-    # MIN
     if "min" in q or "lowest" in q:
         col = columns[0]
         return f"SELECT MIN({col}) AS min FROM data"
 
-    # SHOW ROWS
     return "SELECT * FROM data LIMIT 10"
 
 
 # ============================================================
-# GEMINI SQL
+# GEMINI SQL GENERATION
 # ============================================================
 
 def generate_sql_gemini(question: str, columns: list[str]) -> str:
 
-    if not client:
-        raise RuntimeError("Gemini not available")
+    llm = get_llm()
 
     cols = "\n".join(columns)
 
@@ -126,12 +90,9 @@ Question:
 SQL:
 """
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt
-    )
+    response = llm.generate(prompt)
 
-    return clean_sql(response.text)
+    return clean_sql(response)
 
 
 # ============================================================
@@ -141,10 +102,6 @@ SQL:
 def generate_sql(question: str, columns: list[str]) -> str:
 
     q = question.lower()
-
-    # ----------------------------
-    # SMART GROUP BY RULE
-    # ----------------------------
 
     agg_map = {
         "average": "AVG",
@@ -169,9 +126,7 @@ def generate_sql(question: str, columns: list[str]) -> str:
             detected_group = col
             break
 
-    # If both aggregation + grouping column found
     if detected_agg and detected_group:
-        # guess metric column
         metric = None
         for col in columns:
             if col != detected_group:
@@ -185,18 +140,11 @@ def generate_sql(question: str, columns: list[str]) -> str:
         GROUP BY {detected_group}
         """
 
-    # ----------------------------
-    # TRY GEMINI
-    # ----------------------------
     try:
         return generate_sql_gemini(question, columns)
     except Exception:
-        pass
+        return generate_sql_rule_based(question, columns)
 
-    # ----------------------------
-    # FINAL FALLBACK
-    # ----------------------------
-    return generate_sql_rule_based(question, columns)
 
 # ============================================================
 # RUN SQL

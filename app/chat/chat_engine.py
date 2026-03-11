@@ -7,6 +7,9 @@ from sklearn.linear_model import LinearRegression
 from app.ingestion.csv_loader import get_current_df
 from app.chat.intent_engine import detect_intent
 from app.chat.planner import plan_query
+from app.ai.insight_discovery_engine import discover_insights
+from app.analytics.chart_recommender import recommend_charts
+from app.profiling.data_profiler import profile_dataset_for_chat
 
 
 # ======================================================
@@ -177,12 +180,19 @@ Executive Trend Interpretation:
 
 def deterministic_groupby(df, metric, group_by, aggregation):
 
+    # Safety check: metric and group_by cannot be the same
+    if metric == group_by:
+        raise ValueError("Metric and group_by cannot be the same column")
+
     if aggregation == "mean":
         return df.groupby(group_by)[metric].mean().reset_index()
+
     if aggregation == "sum":
         return df.groupby(group_by)[metric].sum().reset_index()
+
     if aggregation == "max":
         return df.groupby(group_by)[metric].max().reset_index()
+
     if aggregation == "min":
         return df.groupby(group_by)[metric].min().reset_index()
 
@@ -256,6 +266,16 @@ def generate_insight(agg_df, original_df, metric, group_by, aggregation):
     x_col = agg_df.columns[0]
     y_col = agg_df.columns[1]
 
+    # Ensure numeric values
+    agg_df[y_col] = pd.to_numeric(agg_df[y_col], errors="coerce")
+
+    # Drop rows where metric became NaN
+    agg_df = agg_df.dropna(subset=[y_col])
+
+    # If dataframe empty after cleaning
+    if agg_df.empty:
+        return "Unable to compute insights because numeric values were not detected."
+
     max_row = agg_df.loc[agg_df[y_col].idxmax()]
     min_row = agg_df.loc[agg_df[y_col].idxmin()]
     diff = round(max_row[y_col] - min_row[y_col], 2)
@@ -293,12 +313,14 @@ Performance dispersion and concentration metrics should guide resource allocatio
 # MAIN ENGINE
 # ======================================================
 
-def chat_with_data(question: str, filters: dict = None):
+def chat_with_data(question: str, df, filters: dict = None):
 
     global LAST_RESULT_DF, LAST_CHART_TYPE, LAST_TITLE
     global LAST_METRIC, LAST_GROUP_BY, LAST_AGGREGATION
 
-    df = get_current_df()
+
+    #print("DATASET COLUMNS:", df.columns.tolist())
+    #print("QUESTION:", question)
     if df is None:
         return {"type": "text", "answer": "No dataset uploaded."}
 
@@ -306,6 +328,21 @@ def chat_with_data(question: str, filters: dict = None):
     metric = intent.get("metric")
     group_by = intent.get("group_by")
     aggregation = intent.get("aggregation")
+    top_n = intent.get("top_n")
+
+    # Fix swapped metric/group_by for TOP queries
+    if top_n:
+        if metric and group_by:
+            if not pd.api.types.is_numeric_dtype(df[metric]) and pd.api.types.is_numeric_dtype(df[group_by]):
+                metric, group_by = group_by, metric
+
+    # Smart default aggregation
+    if metric and group_by and not aggregation:
+        aggregation = "sum"
+
+    # Default aggregation for TOP queries
+    if top_n and not aggregation:
+        aggregation = "sum"
 
     # ---------- CORRELATION ----------
     if intent.get("analysis_type") == "correlation":
@@ -355,15 +392,156 @@ Changes in {col1} appear to influence {col2}.
     if plan["action"] != "proceed":
         return {"type": "text", "answer": plan["message"]}
 
+    # ---------------------------------------
+    # DATASET PROFILING
+    # ---------------------------------------
+
+    if any(word in question.lower() for word in [
+        "profile dataset",
+        "dataset profile",
+        "analyze dataset structure",
+        "dataset summary",
+        "data profile"
+    ]):
+
+        return profile_dataset_for_chat(df)
+
+    # ---------------------------------------
+    # CHART INTELLIGENCE
+    # ---------------------------------------
+
+    if any(word in question.lower() for word in [
+        "show charts",
+        "important charts",
+        "visualize dataset",
+        "show visualizations",
+        "show dashboard"
+    ]):
+
+        return recommend_charts(df)
+
+    # ---------------------------------------
+    # INSIGHT DISCOVERY MODE
+    # ---------------------------------------
+
+    if any(word in question.lower() for word in [
+        "insights",
+        "analyze dataset",
+        "analyze data",
+        "what stands out",
+        "dataset summary"
+    ]):
+
+        return discover_insights(df)
+
+    # ---------------------------------------
+    # Conversational Memory (Metric Recall)
+    # ---------------------------------------
+
+    if LAST_METRIC and not intent.get("metric"):
+
+        if any(word in question.lower() for word in [
+            "trend",
+            "over time",
+            "distribution",
+            "top",
+            "average",
+            "mean",
+            "sum"
+        ]):
+            intent["metric"] = LAST_METRIC
+
+    # ---------------------------------------
+    # TREND INTELLIGENCE
+    # ---------------------------------------
+
+    if "trend" in question.lower() or "over time" in question.lower():
+
+        date_col = detect_date_column(df)
+
+        if not date_col:
+            return {
+                "type": "text",
+                "answer": "No date column detected in dataset to compute trend."
+            }
+
+        metric = intent.get("metric")
+
+        if not metric or metric not in df.columns:
+            return {
+                "type": "text",
+                "answer": "Please specify a numeric metric for trend analysis."
+            }
+
+        df_trend = build_trend_dataframe(df, metric, date_col)
+
+        chart_payload = {
+            "chart_type": "line",
+            "title": f"{metric} trend over time",
+            "x": date_col,
+            "y": metric,
+            "data": df_trend.to_dict(orient="records")
+        }
+
+        insight = generate_trend_analysis(df, metric, date_col)
+
+        return {
+            "type": "chart",
+            "chart": chart_payload,
+            "insight": insight
+        }
+
     if metric and group_by and aggregation:
 
+        if metric == group_by:
+            return {
+                "type": "text",
+                "answer": f"Cannot aggregate '{metric}' by itself. Try using another column."
+            }
+
         agg_df = deterministic_groupby(df, metric, group_by, aggregation)
+
+        # Convert metric to numeric safely
+        agg_df[metric] = pd.to_numeric(agg_df[metric], errors="coerce")
+
+        # Remove invalid rows
+        agg_df = agg_df.dropna(subset=[metric])
+
+        # Replace any remaining infinite values
+        agg_df = agg_df.replace([np.inf, -np.inf], np.nan)
+
+        # Final cleanup for JSON safety
+        agg_df = agg_df.fillna(0)
+
+        # ---------------------------------------
+        # Apply TOP-N filter if requested
+        # ---------------------------------------
+
+        top_n = intent.get("top_n")
+
+        if top_n:
+            agg_df = agg_df.sort_values(metric, ascending=False).head(top_n)
+
+        agg_df = agg_df.reset_index(drop=True)
+
 
         LAST_RESULT_DF = agg_df
         LAST_METRIC = metric
         LAST_GROUP_BY = group_by
         LAST_AGGREGATION = aggregation
         LAST_TITLE = question
+
+        # ---------------------------------------
+        # Generate Chart
+        # ---------------------------------------
+
+        chart_payload = {
+            "chart_type": "bar",
+            "title": f"{aggregation} {metric} by {group_by}",
+            "x": group_by,
+            "y": metric,
+            "data": agg_df.to_dict(orient="records")
+        }
 
         insight_text = generate_insight(
             agg_df,
@@ -373,6 +551,8 @@ Changes in {col1} appear to influence {col2}.
             aggregation
         )
 
-        return {"type": "text", "answer": insight_text}
-
-    return {"type": "text", "answer": "Try: 'average <metric> by <column>'."}
+        return {
+            "type": "chart",
+            "chart": chart_payload,
+            "insight": insight_text
+        }

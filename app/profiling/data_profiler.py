@@ -12,6 +12,7 @@ def profile_data(df: pd.DataFrame):
 
     profile["rows"] = int(df.shape[0])
     profile["columns"] = int(df.shape[1])
+    profile["column_names"] = df.columns.tolist()
 
     # =========================
     # COLUMN TYPE DETECTION
@@ -53,11 +54,14 @@ def profile_data(df: pd.DataFrame):
     identifier_cols = []
 
     for col in df.columns:
+        try:
+            unique_ratio = df[col].nunique() / len(df)
 
-        unique_ratio = df[col].nunique() / len(df)
+            if unique_ratio > 0.95:
+                identifier_cols.append(col)
 
-        if unique_ratio > 0.95:
-            identifier_cols.append(col)
+        except Exception:
+            continue
 
     profile["identifier_columns"] = identifier_cols
 
@@ -68,11 +72,14 @@ def profile_data(df: pd.DataFrame):
     high_cardinality = []
 
     for col in df.columns:
+        try:
+            if df[col].dtype == "object":
 
-        if df[col].dtype == "object":
+                if df[col].nunique() > 50:
+                    high_cardinality.append(col)
 
-            if df[col].nunique() > 50:
-                high_cardinality.append(col)
+        except Exception:
+            continue
 
     profile["high_cardinality_columns"] = high_cardinality
 
@@ -83,7 +90,6 @@ def profile_data(df: pd.DataFrame):
     stats = {}
 
     for col in numeric_cols:
-
         try:
             stats[col] = {
                 "mean": float(df[col].mean()),
@@ -117,4 +123,26 @@ def profile_data(df: pd.DataFrame):
 
     profile["dataset_signals"] = signals
 
+    # =========================
+    # DATA PREVIEW
+    # =========================
+
+    try:
+        profile["preview_rows"] = df.head(5).to_dict(orient="records")
+    except Exception:
+        profile["preview_rows"] = []
+
     return profile
+
+# =================================
+# CHAT ENGINE WRAPPER
+# =================================
+
+def profile_dataset_for_chat(df: pd.DataFrame):
+
+    profile = profile_data(df)
+
+    return {
+        "type": "dataset_profile",
+        "profile": profile
+    }

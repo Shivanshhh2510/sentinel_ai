@@ -1,9 +1,18 @@
 import pandas as pd
 from app.ingestion.csv_loader import get_current_df
 from app.ai.copilot_brain import analyze_question
+# Note: get_current_df was imported twice in your original snippet, keeping as provided or you can remove the duplicate.
 from app.ingestion.csv_loader import get_current_df
 
-
+def normalize_columns(df):
+    df = df.copy()
+    df.columns = (
+        df.columns
+        .str.lower()
+        .str.strip()
+        .str.replace(" ", "_")
+    )
+    return df
 
 # ======================================
 # HELPER: TOP N AGGREGATION
@@ -130,6 +139,8 @@ def generate_charts_for_question(question: str):
     if df is None or df.empty:
         return []
 
+    df = normalize_columns(df)
+
     q = question.lower()
 
     charts = []
@@ -194,8 +205,10 @@ def generate_charts():
 
     df = get_current_df()
 
-    if df is None:
+    if df is None or df.empty:
         return []
+
+    df = normalize_columns(df)
 
     charts = []
 
@@ -228,8 +241,10 @@ def generate_dynamic_chart(question: str):
 
     df = get_current_df()
 
-    if df is None:
+    if df is None or df.empty:
         return None
+
+    df = normalize_columns(df)
 
     brain = analyze_question(question)
 

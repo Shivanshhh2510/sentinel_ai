@@ -8,6 +8,7 @@ import uuid
 import sqlite3
 import json
 import os
+import time
 
 # ============================
 # CONFIG
@@ -140,6 +141,21 @@ if "chat_loaded" not in st.session_state:
 if "last_plot" not in st.session_state:
     st.session_state.last_plot = None
 
+if "training_summary" not in st.session_state:
+    st.session_state.training_summary = None
+
+if "dataset_trained" not in st.session_state:
+    st.session_state.dataset_trained = False
+
+if "job_id" not in st.session_state:
+    st.session_state.job_id = None
+
+if "job_status" not in st.session_state:
+    st.session_state.job_status = None
+
+if "job_start_time" not in st.session_state:
+    st.session_state.job_start_time = None
+
 # ============================
 # HEADER
 # ============================
@@ -201,9 +217,6 @@ with tabs[0]:
                 else:
                     st.error("Invalid credentials")
 
-# ============================
-# TAB 1 — UPLOAD DATASET
-# ============================
 
 # ============================
 # TAB 1 — DATASET UPLOAD & AUTOML
@@ -216,165 +229,253 @@ with tabs[1]:
     st.subheader("Upload CSV or Excel Dataset")
     file = st.file_uploader("Upload File", type=["csv", "xlsx"])
 
+    # Reset option
+    if st.session_state.get("dataset_trained"):
+        if st.button("🔄 Reset Dataset"):
+            st.session_state.dataset_trained = False
+            st.session_state.training_summary = None
+            st.rerun()
+
     if file:
-        data = file.read()
+
+        data = file.getvalue()
         buf = BytesIO(data)
 
         if file.name.endswith(".csv"):
-
-            # SAFE CSV LOADING (FIX FOR KAGGLE DATASETS)
             try:
                 df = pd.read_csv(buf)
             except:
                 buf.seek(0)
                 df = pd.read_csv(buf, encoding="latin1")
-
         else:
             df = pd.read_excel(buf)
 
         st.dataframe(df, width="stretch")
-        st.success(f"Dataset loaded: {df.shape[0]} rows × {df.shape[1]} columns")
 
-        if st.button("🚀 Train Model"):
+        # ============================
+        # TRAIN BUTTON
+        # ============================
+
+        if st.button("🚀 Train Model") and not st.session_state.get("dataset_trained"):
+
+            buf.seek(0)
 
             r = requests.post(
                 f"{BACKEND_URL}/ingest/csv",
-                files={"file": (file.name, data, file.type)},
+                files={"file": (file.name, buf, "text/csv")},
                 headers=auth_headers()
             )
 
             if r.status_code == 200:
-                s = r.json()["summary"]
 
-                st.success("Model Trained")
+                response = r.json()
 
-                # ============================
-                # DATASET OVERVIEW
-                # ============================
+                st.session_state.job_id = response.get("job_id")
+                st.session_state.job_status = "queued"
+                st.session_state.job_start_time = time.time()
 
-                st.subheader("Dataset Overview")
+                st.info("Training job queued successfully.")
 
-                col1, col2, col3 = st.columns(3)
+            else:
+                st.error("Failed to queue training job.")
+                st.stop()
 
-                col1.metric("Rows", s.get("rows"))
-                col2.metric("Target Column", s.get("target_column"))
-                col3.metric("Problem Type", s.get("problem_type", "Auto"))
 
-                # Target Detection Explanation
-                if "target_reason" in s:
-                    st.info(f"Target Detection Reason: {s.get('target_reason')}")
+        # ============================
+        # JOB STATUS POLLING
+        # ============================
+
+        if st.session_state.get("job_id") and not st.session_state.get("dataset_trained"):
+
+            job_id = st.session_state.job_id
+            status_placeholder = st.empty()
+
+            MAX_TIMEOUT = 300  # 5 minutes safety
+
+            while True:
+
+                # Timeout Protection
+                if time.time() - st.session_state.job_start_time > MAX_TIMEOUT:
+                    status_placeholder.error("Training timed out. Please try again.")
+                    st.session_state.job_id = None
+                    break
+
+                r = requests.get(
+                    f"{BACKEND_URL}/job/{job_id}",
+                    headers=auth_headers()
+                )
+
+                if r.status_code != 200:
+                    status_placeholder.error("Error checking job status.")
+                    break
+
+                data = r.json()
+                status = data.get("status")
+
+                if status == "pending":
+                    status_placeholder.warning("Job is pending...")
+
+                elif status == "processing":
+                    status_placeholder.info("Model training in progress...")
+
+                elif status == "completed":
+
+                    summary = data.get("summary")
+
+                    st.session_state.training_summary = summary
+                    st.session_state.dataset_trained = True
+                    st.session_state.job_id = None
+
+                    status_placeholder.success("Model training completed successfully!")
+
+                    time.sleep(1)
+                    st.rerun()
+
+                elif status == "failed":
+
+                    status_placeholder.error("Training failed.")
+                    st.session_state.job_id = None
+                    break
+
+                time.sleep(2)
+
+
+        # ============================
+        # SHOW TRAINED SUMMARY
+        # ============================
+
+        if st.session_state.get("dataset_trained") and st.session_state.get("training_summary"):
+
+            s = st.session_state.training_summary
+
+        # ============================
+        # RENDER SAVED TRAINING RESULTS
+        # ============================
+
+        if st.session_state.get("dataset_trained") and st.session_state.get("training_summary"):
+
+            s = st.session_state.training_summary
+
+            st.success("Model Trained Successfully")
+
+            # ============================
+            # DATASET OVERVIEW
+            # ============================
+
+            st.subheader("Dataset Overview")
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric("Rows", s.get("rows"))
+            col2.metric("Target Column", s.get("target_column"))
+            col3.metric("Problem Type", s.get("problem_type", "Auto"))
+
+            if "target_reason" in s:
+                st.info(f"Target Detection Reason: {s.get('target_reason')}")
+
+            st.divider()
+
+            # ============================
+            # DATASET STRUCTURE
+            # ============================
+
+            if "profile" in s:
+
+                profile = s["profile"]
+
+                st.subheader("Dataset Structure")
+
+                c1, c2, c3, c4 = st.columns(4)
+
+                c1.metric("Numeric Columns", len(profile.get("numeric_columns", [])))
+                c2.metric("Categorical Columns", len(profile.get("categorical_columns", [])))
+                c3.metric("Date Columns", len(profile.get("datetime_columns", [])))
+                c4.metric("Identifier Columns", len(profile.get("identifier_columns", [])))
 
                 st.divider()
 
                 # ============================
-                # DATASET STRUCTURE
+                # DATA QUALITY SIGNALS
                 # ============================
 
-                if "profile" in s:
+                st.subheader("Data Quality Signals")
 
-                    profile = s["profile"]
+                q1, q2, q3 = st.columns(3)
 
-                    st.subheader("Dataset Structure")
+                q1.metric("Columns with Missing Values", len(profile.get("missing_values", {})))
+                q2.metric("Duplicate Rows", profile.get("duplicate_rows", 0))
+                q3.metric("High Cardinality Columns", len(profile.get("high_cardinality_columns", [])))
 
-                    c1, c2, c3, c4 = st.columns(4)
+                st.divider()
 
-                    c1.metric(
-                        "Numeric Columns",
-                        len(profile.get("numeric_columns", []))
+                # ============================
+                # MODEL READINESS & RISK ASSESSMENT
+                # ============================
+
+                st.markdown("## Model Readiness & Risk Assessment")
+
+                numeric_count = len(profile.get("numeric_columns", []))
+                categorical_count = len(profile.get("categorical_columns", []))
+                datetime_count = len(profile.get("datetime_columns", []))
+                identifier_cols = profile.get("identifier_columns", [])
+                missing_cols = profile.get("missing_values", {})
+                high_card_cols = profile.get("high_cardinality_columns", [])
+
+                # ======================================
+                # READINESS SUMMARY
+                # ======================================
+
+                st.markdown("### Readiness Summary")
+
+                readiness_notes = []
+
+                if numeric_count > 0:
+                    readiness_notes.append(f"- {numeric_count} numeric features available for modeling.")
+
+                if categorical_count > 0:
+                    readiness_notes.append(f"- {categorical_count} categorical features detected.")
+
+                if datetime_count > 0:
+                    readiness_notes.append(f"- {datetime_count} datetime features may support temporal insights.")
+
+                if not readiness_notes:
+                    st.info("Dataset structure is minimal. Modeling flexibility may be limited.")
+                else:
+                    for note in readiness_notes:
+                        st.markdown(note)
+
+                st.markdown("")
+
+                # ======================================
+                # DATA RISK FACTORS
+                # ======================================
+
+                st.markdown("### Data Risk Assessment")
+
+                risk_notes = []
+
+                if len(missing_cols) > 0:
+                    risk_notes.append(
+                        f"- {len(missing_cols)} columns contain missing values which may reduce model stability."
                     )
 
-                    c2.metric(
-                        "Categorical Columns",
-                        len(profile.get("categorical_columns", []))
+                if len(high_card_cols) > 0:
+                    risk_notes.append(
+                        f"- {len(high_card_cols)} high-cardinality features may impact generalization."
                     )
 
-                    c3.metric(
-                        "Date Columns",
-                        len(profile.get("datetime_columns", []))
+                if len(identifier_cols) > 0:
+                    risk_notes.append(
+                        "- Identifier-like columns detected and excluded from modeling."
                     )
 
-                    c4.metric(
-                        "Identifier Columns",
-                        len(profile.get("identifier_columns", []))
-                    )
+                if not risk_notes:
+                    st.success("No major structural risk factors detected.")
+                else:
+                    for note in risk_notes:
+                        st.warning(note)
 
-                    st.divider()
-
-                    # ============================
-                    # DATA QUALITY SIGNALS
-                    # ============================
-
-                    st.subheader("Data Quality Signals")
-
-                    q1, q2, q3 = st.columns(3)
-
-                    q1.metric(
-                        "Columns with Missing Values",
-                        len(profile.get("missing_values", {}))
-                    )
-
-                    q2.metric(
-                        "Duplicate Rows",
-                        profile.get("duplicate_rows", 0)
-                    )
-
-                    q3.metric(
-                        "High Cardinality Columns",
-                        len(profile.get("high_cardinality_columns", []))
-                    )
-
-                    st.divider()
-
-                    # ============================
-                    # SENTINELAI DATASET INTELLIGENCE (NEW)
-                    # ============================
-
-                    st.subheader("SentinelAI Dataset Intelligence")
-
-                    numeric_count = len(profile.get("numeric_columns", []))
-                    categorical_count = len(profile.get("categorical_columns", []))
-                    datetime_count = len(profile.get("datetime_columns", []))
-                    identifier_cols = profile.get("identifier_columns", [])
-                    missing_cols = profile.get("missing_values", {})
-                    high_card_cols = profile.get("high_cardinality_columns", [])
-
-                    summary_text = f"""
-SentinelAI automatically analyzed the dataset structure.
-
-• **{numeric_count} numeric variables** detected
-• **{categorical_count} categorical variables** detected
-• **{datetime_count} datetime variables** detected
-
-The system detected **{len(identifier_cols)} identifier-like columns**, which may not carry predictive signal.
-
-**{len(high_card_cols)} high-cardinality columns** were found and may impact model generalization.
-
-**{len(missing_cols)} columns contain missing values** that could influence model performance.
-
-Based on the dataset structure, SentinelAI identified this as a **{s.get("problem_type")} problem** and selected **{s.get("target_column")}** as the prediction target.
-"""
-
-                    st.info(summary_text)
-
-                    # ============================
-                    # DATA RISK WARNINGS
-                    # ============================
-
-                    if high_card_cols:
-
-                        st.warning(
-                            "High Cardinality Columns Detected: "
-                            + ", ".join(high_card_cols[:5])
-                        )
-
-                    if identifier_cols:
-
-                        st.warning(
-                            "Identifier-like Columns Detected: "
-                            + ", ".join(identifier_cols[:5])
-                        )
-
-                    st.divider()
+                st.markdown("---")
 
                 # ============================
                 # BEST MODEL
@@ -383,72 +484,67 @@ Based on the dataset structure, SentinelAI identified this as a **{s.get("proble
                 st.subheader("Best Model")
 
                 st.metric("Model", s.get("best_model"))
-                st.metric("Best Score", s.get("best_score"))
+                st.metric("Best Score", round(s.get("best_score", 0), 4))
+
+                st.info(
+                    """
+                This model configuration is suitable for analytical insights and pattern discovery.
+                Further feature engineering, data cleaning, and enrichment may improve robustness
+                and predictive confidence.
+                """
+                )
 
                 st.divider()
 
-                # ============================
-                # MODEL COMPARISON
-                # ============================
+            # ============================
+            # MODEL COMPARISON
+            # ============================
 
-                if "model_scores" in s:
+            if "model_scores" in s:
 
-                    scores = s["model_scores"]
+                scores = s["model_scores"]
 
-                    score_df = pd.DataFrame({
-                        "Model": list(scores.keys()),
-                        "Score": list(scores.values())
-                    })
+                score_df = pd.DataFrame({
+                    "Model": list(scores.keys()),
+                    "Score": list(scores.values())
+                })
 
-                    st.subheader("Model Comparison")
+                st.subheader("Model Comparison")
 
-                    fig = px.bar(
-                        score_df,
-                        x="Model",
-                        y="Score",
-                        color="Model"
-                    )
-
-                    st.plotly_chart(fig, width="stretch")
+                fig = px.bar(score_df, x="Model", y="Score", color="Model")
+                st.plotly_chart(fig, width="stretch")
 
                 st.divider()
 
-                # ============================
-                # FEATURE IMPORTANCE
-                # ============================
+            # ============================
+            # FEATURE IMPORTANCE
+            # ============================
 
-                if "top_features" in s:
+            if "top_features" in s:
 
-                    st.subheader("Top Feature Drivers")
+                st.subheader("Top Feature Drivers")
 
-                    fi_df = pd.DataFrame({
-                        "Feature": list(s["top_features"].keys()),
-                        "Importance": list(s["top_features"].values())
-                    })
+                fi_df = pd.DataFrame({
+                    "Feature": list(s["top_features"].keys()),
+                    "Importance": list(s["top_features"].values())
+                })
 
-                    fig2 = px.bar(
-                        fi_df,
-                        x="Importance",
-                        y="Feature",
-                        orientation="h"
-                    )
+                fig2 = px.bar(fi_df, x="Importance", y="Feature", orientation="h")
+                st.plotly_chart(fig2, width="stretch")
 
-                    st.plotly_chart(fig2, width="stretch")
+            # ============================
+            # AI INTERPRETATION
+            # ============================
 
-                # ============================
-                # AI SUMMARY
-                # ============================
+            if "ai_summary" in s:
 
-                if "ai_summary" in s:
-
-                    st.divider()
-                    st.subheader("AI Interpretation")
-                    st.success(s["ai_summary"])
+                st.divider()
+                st.subheader("AI Interpretation")
+                st.success(s["ai_summary"])
 
                 # ============================
                 # AI CHART RECOMMENDATIONS
                 # ============================
-
                 st.divider()
                 st.subheader("AI Recommended Visualizations")
 
@@ -461,42 +557,52 @@ Based on the dataset structure, SentinelAI identified this as a **{s.get("proble
 
                     if r.status_code == 200:
 
-                        charts = r.json()["charts"]
+                        response_json = r.json()
+                        charts = response_json.get("charts", [])
 
-                        for chart in charts:
+                        if not charts:
+                            st.info("No recommended visualizations available for this dataset.")
+                        else:
 
-                            if "data" not in chart:
-                                continue
+                            for chart in charts:
 
-                            df_chart = pd.DataFrame(chart["data"])
+                                if "data" not in chart:
+                                    continue
 
-                            if chart["chart_type"] == "bar":
+                                df_chart = pd.DataFrame(chart["data"])
 
-                                fig = px.bar(
-                                    df_chart,
-                                    x=chart["x"],
-                                    y=chart["y"],
-                                    title=chart["title"]
-                                )
+                                # BAR
+                                if chart["chart_type"] == "bar":
 
-                            elif chart["chart_type"] == "line":
+                                    fig = px.bar(
+                                        df_chart,
+                                        x=chart["x"],
+                                        y=chart["y"],
+                                        title=chart["title"]
+                                    )
 
-                                fig = px.line(
-                                    df_chart,
-                                    x=chart["x"],
-                                    y=chart["y"],
-                                    title=chart["title"]
-                                )
+                                # LINE
+                                elif chart["chart_type"] == "line":
 
-                            else:
-                                continue
+                                    fig = px.line(
+                                        df_chart,
+                                        x=chart["x"],
+                                        y=chart["y"],
+                                        title=chart["title"]
+                                    )
 
-                            st.plotly_chart(fig, width="stretch")
+                                else:
+                                    continue
 
-                            st.session_state.last_plot = chart
+                                st.plotly_chart(fig, width="stretch")
 
-                except Exception:
-                    pass
+                                st.session_state.last_plot = chart
+
+                    else:
+                        st.warning("Could not retrieve recommended charts from backend.")
+
+                except Exception as e:
+                    st.warning("Chart generation failed.")
 
 # ============================
 # TAB 2 — AI DATA COPILOT
@@ -533,7 +639,14 @@ with tabs[2]:
 
             if r.status_code == 200:
 
-                data = r.json()["copilot_response"]
+                response_json = r.json()
+
+                if "copilot_response" in response_json:
+                    data = response_json["copilot_response"]
+                else:
+                    st.error("Unexpected backend response format.")
+                    st.json(response_json)
+                    st.stop()
 
                 message = {
                     "question": question,
@@ -882,7 +995,7 @@ with tabs[3]:
                 st.plotly_chart(
                     fig,
                     width="stretch",
-                    key=f"dashboard_chart_{name}_{chart['title']}_{id(chart)}"
+                    key=f"dashboard_chart_{name}_{chart['title']}_{uuid.uuid4()}"
                 )
 
 st.divider()

@@ -1,6 +1,6 @@
 from app.rag.retriever import build_context
 from app.analytics.query_engine import is_analytical_query, run_analytical_query
-from app.ai.llm_engine import generate_llm_response
+from app.llm.llm_factory import get_llm
 
 
 # =================================
@@ -58,7 +58,7 @@ QUESTION:
 {query}
 
 Rules:
-- Use the data provided
+- Use only the data provided
 - Mention numbers when possible
 - If the answer cannot be determined from the rows, say:
   "The dataset rows do not contain enough information."
@@ -68,14 +68,19 @@ Rules:
         # STEP 4 — LLM Response
         # --------------------------------
 
-        llm_response = generate_llm_response(prompt)
+        llm = get_llm()
+
+        llm_response = llm.generate(prompt)
+
+        if not llm_response:
+            llm_response = "Unable to generate AI response."
 
         return {
             "status": "success",
             "query": query,
             "engine": "rag",
             "context_used": context,
-            "answer": llm_response if llm_response else "Unable to generate AI response."
+            "answer": llm_response
         }
 
     except Exception as e:
